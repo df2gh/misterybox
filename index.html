@@ -15,6 +15,7 @@ img { display: block }
 .head-ratio { font-size: 80%; font-weight: normal; }
 .value { font-size: 70%; text-align: center }
 #setup { width: 90%; border: 1px solid #111; position: absolute; background: #fff; padding: 1em; }
+#history { width: 90%; border: 1px solid #111; position: absolute; background: #fff; padding: 1em; }
 .visible { display: float }
 .hidden { display: none }
   </style>
@@ -47,11 +48,23 @@ const ENTRIES = {
   11040: ["MP7H1", 1, 1],
 };
 
+const CATEGORIES = {
+  "standard": 1, "limited": 3, "wepon": 4, "startdash": 5
+};
 
 window.addEventListener("load", function () {
   getElement("setup-button").addEventListener("click", () => { showElement("setup", true); });
+  getElement("setup-close").addEventListener("click", () => { showElement("setup", false); });
   getElement("player-data-button").addEventListener("click", readFromPlayerData);
   getElement("data-set-button").addEventListener("click", readFromDataSet);
+  getElement("history-button").addEventListener("click", () => { showElement("history", true); });
+  getElement("history-close").addEventListener("click", () => { showElement("history", false); });
+  getElement("upload").addEventListener("click", () => { getElement("history-upload").click(); });
+  getElement("history-upload").addEventListener("change", historyUpload);
+
+  getElement("misterybox").addEventListener("click", () => {
+    fetchHistory([8], "misterybox");
+  });
   const m = new UserDataManager();
   if (!m.hasData()) {
     showElement("setup", true);
@@ -59,6 +72,8 @@ window.addEventListener("load", function () {
     loadData();
   }
 });
+
+
 
 function readFromPlayerData() {
   const s = getValue("player-data");
@@ -106,7 +121,19 @@ class Fetcher {
     this.callback = callback;
   }
 
-  fetchNext = () => {
+  async fetch() {
+    await this.fetchNext();
+    while (true) {
+      if (this.next_id) {
+        await this.fetchNext();
+      } else if (this.callback) {
+        this.callback(this.entries);
+        break;
+      }
+    }
+  }
+
+  async fetchNext() {
     const limit = 20;
     let data = `type_id=${this.type_id}&u=${this.uid}&limit=${limit}`;
     if (this.next_id !== null && this.next_id != "") {
@@ -124,23 +151,17 @@ class Fetcher {
     };
     const req = new Request(this.target, options);
 
-    window
-      .fetch(req)
-      .then((response) => {
-        if (!response.ok) {
-          // todo, show error
-          console.log("no response");
-        } else {
-          response.blob().then((blob) => {
-            blob.text().then((s) => {
-              this.parseResponse(s);
-            });
-          });
-        }
-      });
+    const response = await window.fetch(req);
+    if (!response.ok) {
+      console.log("no response");
+    } else {
+      const blob = await response.blob();
+      const s = await blob.text();
+      await this.parseResult(s);
+    }
   }
-
-  parseResponse = (s) => {
+  //[entry.pool_id, entry.item, entry.time]
+  async parseResult(s) {
     const data = JSON.parse(s);
     if (data.code != 0 && data.message != "OK") {
       // uid or token is wrong
@@ -155,14 +176,9 @@ class Fetcher {
       const id = entry.item;
       const v = ENTRIES[entry.item];
       if (v === undefined) {
-        console.log("item entry not found", entry.item);
+        //console.log("item entry not found", entry.item);
       }
       this.entries.push(entry);
-    }
-    if (this.next_id) {
-      this.fetchNext();
-    } else if (this.callback) {
-      this.callback(this.entries);
     }
   }
 }
@@ -173,7 +189,7 @@ function loadData() {
 
   const entries = [];
   const f = new Fetcher(data.uid, data.token, 8, entries, parseResult);
-  f.fetchNext();
+  f.fetch();
 }
 
 function parseResult(entries) {
@@ -210,24 +226,94 @@ function parseResult(entries) {
   setText("ssr-ratio", roundRatio(rarities[2] / count * 100) + "%");
 }
 
+async function fetchHistory(categories, prefix) {
+  const m = new UserDataManager();
+  const data = m.read();
+
+  const history = {};
+  for (const category of categories) {
+    const entries = [];
+    const f = new Fetcher(data.uid, data.token, category, entries, () => {
+      return true;
+    });
+    await f.fetch();
+    history[category] = entries;
+  }
+  downloadData(history, prefix);
+}
+
+async function downloadData(data, prefix) {
+  const date = new Date();
+  const name = `${prefix}-${historyDate(date)}.gz`;
+
+  const ab = await compressData(data);
+  const blob = new Blob([ab], {type: "application/gzip"});
+  startDownload(blob, prefix + "-link", name);
+}
+
+function startDownload(blob, id, name) {
+  const url = URL.createObjectURL(blob);
+  const a = getElement(id);
+  a.href = url;
+  a.download = name;
+  a.click();
+  window.URL.revokeObjectURL(url);
+}
+
+async function historyUpload() {
+  const element = getElement("history-upload");
+  if (element.files.length == 1) {
+    const f = element.files[0];
+    const data = await decompressData(f);
+    if (data[8] !== undefined) {
+      const ab = await compressData(data);
+      const b64 = bytesToBase64(new Uint8Array(ab));
+      // todo, store b64
+
+      const bbs = base64ToBytes(b64);
+      const d = await decompressData(new Blob([bbs]));
+      console.log(d);
+    }
+    // todo
+
+  }
+}
+
+function base64ToBytes(base64) {
+  const binString = atob(base64);
+  return Uint8Array.from(binString, (m) => m.codePointAt(0));
+}
+
+function bytesToBase64(bytes) {
+  const binString = Array.from(bytes, (byte) =>
+    String.fromCodePoint(byte),
+  ).join("");
+  return btoa(binString);
+}
+
+async function compressData(data) {
+  const s = JSON.stringify(data);
+  const stream = new Blob([s]).stream();
+  const compressedStream = stream.pipeThrough(new CompressionStream("gzip"))
+  return await new Response(compressedStream).arrayBuffer();
+}
+
+async function decompressData(blob) {
+  const readableStream = blob.stream();
+  const decompressedStream = readableStream.pipeThrough(new DecompressionStream("gzip"));
+  return await new Response(decompressedStream).json();
+}
+
+function historyDate(d) {
+  return `${d.getFullYear()}${zeroFill(d.getMonth() + 1)}${zeroFill(d.getDate())}${zeroFill(d.getHours())}${zeroFill(d.getMinutes())}${zeroFill(d.getSeconds())}`;
+}
+
+function zeroFill(v) {
+  return v.toString().length == 1 ? "0" + v : v;
+}
+
 function roundRatio(r) {
   return r.toPrecision(2);
-}
-
-function getElement(id) {
-  return document.getElementById(id);
-}
-
-function getText(id) {
-  return document.getElementById(id).textContent;
-}
-
-function setText(id, s) {
-  document.getElementById(id).textContent = s;
-}
-
-function getValue(id) {
-  return document.getElementById(id).value;
 }
 
 class UserDataManager {
@@ -254,9 +340,70 @@ class UserDataManager {
   }
 }
 
+// {start: time_start, end: time_end}
+class HistoryManager {
+  constructor() {
+  }
+
+  readAllData(category) {
+    const a = [];
+    for (let i = 0; i < 1000; i++) {
+      const key = this.getKey(category, i);
+      const data = localStorage.getItem(key);
+      if (data != null) {
+        a.push(data);
+      } else {
+        break;
+      }
+    }
+    return a;
+  }
+
+  addData(category, data) {
+    const index = this.findNextId(category);
+    if (index != null) {
+      const key = this.getKey(category, i);
+      localStorage.setItem(key, data);
+    }
+  }
+
+  findNextId(category) {
+    for (let i = 0; i < 1000; i++) {
+      const key = this.getKey(category, i);
+      if (localStorage.getItem(key) == null) {
+        return i;
+      }
+    }
+    return null;
+  }
+
+  getKey(category, i) {
+    return `${category}-${i}`;
+  }
+}
+
+function getElement(id) {
+  return document.getElementById(id);
+}
+
+function getText(id) {
+  return document.getElementById(id).textContent;
+}
+
+function setText(id, s) {
+  document.getElementById(id).textContent = s;
+}
+
+function getValue(id) {
+  return document.getElementById(id).value;
+}
 </script>
-<div id="setup-button" style="position: absolute; border: 1px solid #888; left: 90%; font-size: 90%; color: #888">設定</div>
+<div id="" style="position: absolute; left: 85%">
+<input type="button" value="履歴" id="history-button">
+<input type="button" value="設定" id="setup-button">
+</div>
 <div id="setup" class="hidden">
+  <input type="button" value="閉じる" id="setup-close" style="position: absolute; left: 90%">
   <div><a href="https://github.com/df2gh/misterybox">使い方</a></div>
   <div class="hidden" id="error" style="color: #f00"></div>
   <table>
@@ -273,6 +420,22 @@ class UserDataManager {
     <tr><td><input type="button" value="読み込み" id="data-set-button"></td></tr>
   </table>
 </div>
+
+<div id="history" class="hidden">
+  <input type="button" value="閉じる" id="history-close" style="position: absolute; left: 90%; top: 1.55em;">
+  <h3>履歴</h3>
+  <table id="history-table-head">
+    <tr><td><input type="button" value="サーバーから現在取得可能な履歴をダウンロード" id="misterybox"></td></tr>
+  </table>
+  <table id="history-table">
+  </table>
+  <table>
+    <tr><td><input type="button" value="アップロード" id="upload"></td></tr>
+  </table>
+  <a href="" id="misterybox-link" class="hidden"></a>
+  <input type="file" class="hidden" id="history-upload" accept="application/gzip">
+</div>
+
 <div id="result">
   <h2>ミステリーボックス - <span id="count"></span> 回中</h2>
   <h3>SSR - <span id="ssr-ratio" class="head-ratio"></span></h3>
@@ -354,5 +517,8 @@ class UserDataManager {
     </tr>
   </table>
 </div>
+
+<div>ガチャ履歴とミステリーボックス履歴を統合したサイトができました: <a href="https://df2gh.github.io/gacha/">https://df2gh.github.io/gacha/</a></div>
+
 </body>
 </html>
